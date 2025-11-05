@@ -19,32 +19,41 @@ def normalize_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 async def get_all_product_urls(page) -> list[str]:
-    """遍历 Arc'teryx 集合页，抓取商品 URL（自动滚动 + 兜底翻页）"""
     urls = set()
+
+    def normalize_product_path(href: str) -> str:
+        # 只保留 /products/<handle>
+        # 例: /products/arcteryx-mantis-1-waist-pack/4359... -> /products/arcteryx-mantis-1-waist-pack
+        parts = href.split("?")[0].split("/")
+        # ['', 'products', '<handle>', '<maybe-variant-id>...']
+        if len(parts) >= 3 and parts[1] == "products":
+            return "/".join(parts[:3])
+        return href.split("?")[0]
 
     async def collect_from_current():
         cards = await page.locator('a[href^="/products/"]').all()
         for a in cards:
             href = await a.get_attribute("href")
             if href and href.startswith("/products/"):
-                urls.add(urljoin(BASE, href.split("?")[0]))
+                norm = normalize_product_path(href)
+                urls.add(urljoin(BASE, norm))
 
     await page.goto(COLLECTION, wait_until="domcontentloaded")
     await page.set_viewport_size({"width": 1400, "height": 1000})
 
-    # 无限滚动尝试
+    # 无限滚动
     last_height = 0
     for _ in range(8):
         await collect_from_current()
         await page.mouse.wheel(0, 4000)
-        await asyncio.sleep(SCROLL_PAUSE / 1000)
+        await asyncio.sleep(SCROLL_PAUSE/1000)
         height = await page.evaluate("document.body.scrollHeight")
         if height == last_height:
             break
         last_height = height
 
-    # 兜底：传统翻页 ?page=2...
-    for p in range(2, MAX_PAGES + 1):
+    # 兜底分页
+    for p in range(2, MAX_PAGES+1):
         url = f"{COLLECTION}?page={p}"
         resp = await page.goto(url, wait_until="domcontentloaded")
         if not resp or resp.status != 200:
@@ -53,6 +62,7 @@ async def get_all_product_urls(page) -> list[str]:
         await collect_from_current()
         if len(urls) == before:
             break
+
     return sorted(urls)
 
 async def parse_product(page, url: str) -> dict:
