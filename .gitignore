@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+
+# Tools
+.playwright/
+pytest_cache/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
