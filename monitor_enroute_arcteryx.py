@@ -65,11 +65,40 @@ async def get_all_product_urls(page) -> list[str]:
 
     return sorted(urls)
 
+from urllib.parse import urlparse
+
+async def _safe_get_title(page, url: str) -> str:
+    # 先等待页面网络稳定，让前端加载完
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    # 多路尝试获取标题
+    title = await page.evaluate("""() => {
+        const pick = (el) => el && el.textContent ? el.textContent.trim() : '';
+        const h1 = document.querySelector('h1');
+        if (h1 && pick(h1)) return pick(h1);
+        const og = document.querySelector('meta[property="og:title"]');
+        if (og && og.content) return og.content.trim();
+        return document.title || '';
+    }""")
+    title = (title or "").strip()
+    if title:
+        return title
+    # 最后从 URL 提取 handle
+    path = urlparse(url).path.split("/")
+    try:
+        i = path.index("products")
+        handle = path[i+1] if len(path) > i+1 else ""
+    except ValueError:
+        handle = ""
+    return handle.replace("-", " ").strip() or "Arc'teryx"
+
 async def parse_product(page, url: str) -> dict:
     """解析商品页，返回 { title, variants: [{color, size, available}] }"""
-    await page.goto(url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT)
-    await page.wait_for_timeout(500)  # 给前端脚本渲染时间
-    title = normalize_space(await page.locator("h1, h1 >> text=*").first.text_content() or "")
+await page.goto(url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT)
+await page.wait_for_timeout(500)  # 让前端脚本有时间挂载
+title = normalize_space(await _safe_get_title(page, url))
     variants = []
 
     # 优先从埋点 JSON 中读变体
