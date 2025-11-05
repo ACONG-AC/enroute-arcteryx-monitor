@@ -10,7 +10,7 @@ COLLECTION = "https://enroute.run/collections/arcteryx"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 SNAPSHOT = Path("snapshot.json")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-REQUEST_TIMEOUT = 30000  # ms
+REQUEST_TIMEOUT = 60000  # ms
 SCROLL_PAUSE = 800  # ms
 MAX_PAGES = 20       # 保险翻页上限
 # ================
@@ -220,10 +220,28 @@ async def send_discord(changes):
                 text = await resp.text()
                 print("Discord 推送失败:", resp.status, text)
 
+async def parse_with_retry(page, url: str, tries=3):
+    """包装 parse_product，失败时自动重试"""
+    for t in range(1, tries + 1):
+        try:
+            return await parse_product(page, url)
+        except Exception as e:
+            print(f"  ⚠️ 第 {t} 次尝试失败: {url} -> {e}")
+            if t == tries:
+                raise  # 最后一次仍失败就抛出
+            await asyncio.sleep(1.5 * t)  # 递增退避等待再试
+
 async def run_once():
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = await browser.new_context(user_agent=USER_AGENT, viewport={"width": 1400, "height": 1000})
+        browser = await pw.chromium.launch(headless=True, args=[
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+        ])
+        context = await browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1400, "height": 1000},
+            locale="en-US",
+        )
         page = await context.new_page()
 
         print("抓取品牌集合页商品链接…")
@@ -232,11 +250,11 @@ async def run_once():
 
         new_map = {}
         for i, u in enumerate(urls, 1):
-            try:
-                prod = await parse_product(page, u)
-            except Exception as e:
-                print(f"[{i}/{len(urls)}] 解析失败: {u} -> {e}")
-                continue
+    try:
+        prod = await parse_with_retry(page, u, tries=3)
+    except Exception as e:
+        print(f"[{i}/{len(urls)}] 解析失败: {u} -> {e}")
+        continue
 
             title = prod["title"] or "Arc'teryx"
             for v in prod["variants"] or []:
