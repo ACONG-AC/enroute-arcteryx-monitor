@@ -5,7 +5,7 @@ import re
 import time
 import random
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import aiohttp
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
@@ -17,6 +17,7 @@ USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120 Safari/537.36"
 )
+
 SNAPSHOT = Path("snapshot.json")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 
@@ -24,16 +25,20 @@ DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 REQUEST_TIMEOUT = 20000  # 单次 HTTP 请求超时（毫秒）
 MAX_PAGES = 20
 SCROLL_PAUSE = 700
-MAX_CONCURRENCY = 8      # 并发抓取产品 JSON 的并发度
+MAX_CONCURRENCY = 8
 HTTP_RETRIES = 3
 
 # 功能开关
-TRY_VARIANT_QTY = True   # 尝试 GET /variants/<id>.json 获取库存数量（若被禁会自动略过）
+TRY_VARIANT_QTY = True   # 尝试 GET /variants/<id>.json 获取库存数量
 
+# 通知开关：仅当有变更时才发；无变更不发（由 workflow 固定为 false）
+NOTIFY_ON_NO_CHANGE = os.environ.get("NOTIFY_ON_NO_CHANGE", "").lower() == "true"
 # =================================================
+
 
 def normalize_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
+
 
 def cents_to_str(cents: int | None, currency: str | None) -> str:
     if cents is None:
@@ -41,6 +46,7 @@ def cents_to_str(cents: int | None, currency: str | None) -> str:
     cur = (currency or "USD").upper()
     sym = "$" if cur in ("USD", "CAD", "AUD", "NZD", "SGD") else f"{cur} "
     return f"{sym}{cents/100:.2f}"
+
 
 def get_handle_from_url(url: str) -> str:
     path = urlparse(url).path.split("/")
@@ -51,10 +57,10 @@ def get_handle_from_url(url: str) -> str:
         handle = ""
     return handle
 
+
 async def get_all_product_handles() -> list[str]:
     """
     用 Playwright 打开集合页，仅提取 /products/<handle> 列表（去重）。
-    不再逐个打开产品详情页，稳定且快速。
     """
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -65,7 +71,6 @@ async def get_all_product_handles() -> list[str]:
             user_agent=USER_AGENT, viewport={"width": 1400, "height": 1000}, locale="en-US"
         )
 
-        # 轻拦截资源，提速
         async def _route_filter(route):
             r = route.request
             rt = r.resource_type
@@ -75,7 +80,7 @@ async def get_all_product_handles() -> list[str]:
         await ctx.route("**/*", _route_filter)
 
         page = await ctx.new_page()
-        urls = set()
+        handles = set()
 
         def normalize_product_path(href: str) -> str:
             parts = href.split("?")[0].split("/")
@@ -89,16 +94,16 @@ async def get_all_product_handles() -> list[str]:
                 href = await a.get_attribute("href")
                 if href and href.startswith("/products/"):
                     norm = normalize_product_path(href)
-                    handle = get_handle_from_url(norm)
-                    if handle:
-                        urls.add(handle)
+                    h = get_handle_from_url(norm)
+                    if h:
+                        handles.add(h)
 
         try:
             await page.goto(COLLECTION, wait_until="domcontentloaded", timeout=30000)
         except PWTimeout:
             await page.goto(COLLECTION, wait_until="commit")
 
-        # 无限滚动
+        # 滚动加载
         last_height = 0
         for _ in range(10):
             await collect_from_current()
@@ -109,7 +114,7 @@ async def get_all_product_handles() -> list[str]:
                 break
             last_height = height
 
-        # 兜底分页 ?page=2...
+        # 兜底分页
         for p in range(2, MAX_PAGES + 1):
             url = f"{COLLECTION}?page={p}"
             try:
@@ -118,15 +123,16 @@ async def get_all_product_handles() -> list[str]:
                     break
             except PWTimeout:
                 break
-            before = len(urls)
+            before = len(handles)
             await collect_from_current()
-            if len(urls) == before:
+            if len(handles) == before:
                 break
 
         await browser.close()
-        return sorted(urls)
+        return sorted(handles)
 
-# ---------- HTTP 抓取（无需渲染） ----------
+
+# -------- HTTP 抓取（无需渲染产品页） --------
 
 class HttpClient:
     def __init__(self, timeout_ms: int = REQUEST_TIMEOUT):
@@ -140,7 +146,6 @@ class HttpClient:
                     if r.status == 200:
                         return await r.json()
                     elif r.status in (403, 404):
-                        # 明确禁止/不存在就别再试
                         return None
                     else:
                         last_err = f"HTTP {r.status}"
@@ -151,13 +156,33 @@ class HttpClient:
             print(f"GET {url} failed after {retries} tries: {last_err}")
         return None
 
+
 http = HttpClient()
+
+
+def parse_price_to_cents(v) -> int | None:
+    if v is None:
+        return None
+    try:
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float):
+            return int(round(v * 100))
+        s = str(v).strip().replace(",", "").replace("$", "")
+        if re.match(r"^\d+(\.\d{1,2})?$", s):
+            return int(round(float(s) * 100))
+        if s.isdigit():
+            return int(s)
+    except Exception:
+        return None
+    return None
+
 
 async def fetch_product(handle: str, session: aiohttp.ClientSession):
     """
     直接请求 Shopify JSON：
-    - /products/<handle>.js  拿到 variants（含 id / available / price）
-    - 可选每个 variant 再试 /variants/<id>.json 拿 inventory_quantity
+      /products/<handle>.js → 变体基本信息
+      /variants/<id>.json   → 尝试获取 inventory_quantity（若允许）
     """
     prod_url = f"{BASE}/products/{handle}.js"
     data = await http.get_json(session, prod_url)
@@ -165,24 +190,20 @@ async def fetch_product(handle: str, session: aiohttp.ClientSession):
         return None
 
     title = normalize_space(data.get("title") or handle.replace("-", " "))
-    currency = "USD"  # 一些店不会给 currency，这里默认 USD（可从 theme 获取但没必要）
-
+    currency = "USD"
     variants = []
+
     for v in data.get("variants", []) or []:
         vid = v.get("id")
         available = bool(v.get("available", False))
-        # price 可能为分或字符串金额；标准化为分
         price_cents = parse_price_to_cents(v.get("price"))
-        # 选项
         color = v.get("option2") or ""
         size  = v.get("option1") or ""
-        # 一些商店选项顺序不同，做个保险
         if not color and isinstance(v.get("options"), list) and len(v["options"]) >= 2:
             color, size = v["options"][0], v["options"][1]
 
         inv_qty = None
         if TRY_VARIANT_QTY and vid:
-            # 尝试拿具体库存数量（很多店开放，少数店禁用则返回 403/404）
             vi = await http.get_json(session, f"{BASE}/variants/{vid}.json")
             if vi and isinstance(vi.get("variant"), dict):
                 q = vi["variant"].get("inventory_quantity")
@@ -206,31 +227,16 @@ async def fetch_product(handle: str, session: aiohttp.ClientSession):
         "url": f"{BASE}/products/{handle}",
     }
 
-def parse_price_to_cents(v) -> int | None:
-    if v is None:
-        return None
-    try:
-        if isinstance(v, int):
-            # 很多 .js 里就是分
-            return v
-        if isinstance(v, float):
-            return int(round(v * 100))
-        s = str(v).strip().replace(",", "").replace("$", "")
-        if re.match(r"^\d+(\.\d{1,2})?$", s):
-            return int(round(float(s) * 100))
-        if s.isdigit():
-            return int(s)
-    except Exception:
-        return None
-    return None
 
 def to_variant_key(entry: dict) -> str:
     if entry.get("variant_id"):
         return f"vid:{entry['variant_id']}"
     return f"name:{entry.get('title','')}|{entry.get('color','')}|{entry.get('size','')}"
 
+
 def build_snapshot(products: dict[str, str], variants_map: dict[str, dict]) -> dict:
     return {"version": 2, "products": products, "variants": variants_map}
+
 
 def read_snapshot() -> dict:
     if not SNAPSHOT.exists():
@@ -247,19 +253,23 @@ def read_snapshot() -> dict:
         pass
     return build_snapshot({}, {})
 
-def diff_events(old_snap: dict, new_snap: dict, currency: str):
-    events = []
 
+def diff_events(old_snap: dict, new_snap: dict, currency: str):
+    """
+    事件类型：
+      NEW_PRODUCT / NEW_VARIANT / PRICE_CHANGE / INVENTORY_INCREASE / INVENTORY_INCREASE_PRODUCT
+    """
+    events = []
     old_products = old_snap.get("products", {})
     new_products = new_snap.get("products", {})
     old_vars = old_snap.get("variants", {})
     new_vars = new_snap.get("variants", {})
 
-    # 上新（按 handle）
+    # 上新（handle 维度）
     for h in sorted(set(new_products) - set(old_products)):
         events.append({"type": "NEW_PRODUCT", "handle": h, "title": new_products[h]})
 
-    # 变体对比：价格、库存增加、新变体
+    # 变体对比
     for k, nv in new_vars.items():
         ov = old_vars.get(k)
         if ov is None:
@@ -269,7 +279,7 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
                 "size": nv.get("size"), "url": nv.get("url")
             })
             continue
-        # 价格变化
+
         np, op = nv.get("price_cents"), ov.get("price_cents")
         if np is not None and op is not None and np != op:
             events.append({
@@ -278,7 +288,7 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
                 "size": nv.get("size"), "old_price": op, "new_price": np,
                 "currency": currency, "url": nv.get("url")
             })
-        # 库存增加
+
         n_q, o_q = nv.get("inventory_qty"), ov.get("inventory_qty")
         if isinstance(n_q, int) and isinstance(o_q, int) and n_q > o_q:
             events.append({
@@ -296,7 +306,7 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
                     "old_qty": None, "new_qty": None, "url": nv.get("url")
                 })
 
-    # 产品维度：可购变体数增加（可选保留，通常很有用）
+    # 产品维度：可购变体数增加
     def avail_count_per_handle(variants: dict[str, dict]) -> dict[str, int]:
         cnt = {}
         for v in variants.values():
@@ -317,6 +327,7 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
             })
     return events
 
+
 async def send_discord_embeds(embeds: list[dict]):
     if not DISCORD_WEBHOOK:
         print("WARN: 未设置 DISCORD_WEBHOOK_URL，跳过通知。")
@@ -325,8 +336,11 @@ async def send_discord_embeds(embeds: list[dict]):
         return
     async with aiohttp.ClientSession() as session:
         async with session.post(DISCORD_WEBHOOK, json={"embeds": embeds}, timeout=30) as resp:
+            body = await resp.text()
+            print(f"Discord embeds status={resp.status}, len={len(embeds)}")
             if resp.status >= 300:
-                print("Discord 推送失败:", resp.status, await resp.text())
+                print("Discord 推送失败:", resp.status, body)
+
 
 async def send_text(msg: str):
     if not DISCORD_WEBHOOK:
@@ -334,12 +348,15 @@ async def send_text(msg: str):
         return
     async with aiohttp.ClientSession() as session:
         async with session.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=30) as resp:
+            body = await resp.text()
+            print(f"Discord text status={resp.status}")
             if resp.status >= 300:
-                print("Discord 文本推送失败:", resp.status, await resp.text())
+                print("Discord 文本推送失败:", resp.status, body)
+
 
 def events_to_embeds(events: list[dict], currency: str) -> list[dict]:
     embeds = []
-    for e in events[:12]:  # 每批 12 条以内
+    for e in events[:12]:
         t = e["type"]
         if t == "NEW_PRODUCT":
             embeds.append({
@@ -390,10 +407,8 @@ def events_to_embeds(events: list[dict], currency: str) -> list[dict]:
             })
     return embeds
 
-async def run_once():
-    if not DISCORD_WEBHOOK:
-        print("WARN: 环境变量 DISCORD_WEBHOOK_URL 为空；将无法发送 Discord 通知。")
 
+async def run_once():
     print("收集商品 handle ...")
     handles = await get_all_product_handles()
     print(f"共发现 {len(handles)} 个商品 handle")
@@ -401,7 +416,7 @@ async def run_once():
     is_first_run = not SNAPSHOT.exists()
     old_snap = read_snapshot()
 
-    # 并发抓取商品 JSON
+    # 并发抓取
     semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
     products: dict[str, dict] = {}
 
@@ -420,7 +435,6 @@ async def run_once():
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT/1000)) as session:
         tasks = [asyncio.create_task(worker(h, session)) for h in handles]
-        # 可选：进度打印
         done = 0
         for f in asyncio.as_completed(tasks):
             await f
@@ -460,21 +474,16 @@ async def run_once():
     print(f"事件条目：{len(events)}")
     SNAPSHOT.write_text(json.dumps(new_snap, ensure_ascii=False, indent=2), "utf-8")
 
-    # 通知逻辑
-    notify_on_no_change = os.environ.get("NOTIFY_ON_NO_CHANGE", "").lower() == "true"
-    if is_first_run:
-        await send_text(
-            f"✅ 初始化完成：已建立监控基线。\n"
-            f"商品数：{len(new_products)}，变体数：{len(new_variants)}。\n"
-            f"监控范围：上新 / 价格变化 / 库存增加（含从缺货→有货）。"
-        )
-    elif events:
+    # 仅在有事件时才通知；初始化与无变更都不发
+    if events:
         embeds = events_to_embeds(events, currency_seen)
         await send_discord_embeds(embeds)
-    elif notify_on_no_change:
+    elif NOTIFY_ON_NO_CHANGE:
+        # 理论上不会触发，因为 workflow 中已固定为 false；这行作为保险留着
         await send_text("运行成功：本次无上新、无价格变化、无库存增加。")
 
-# 支持单品调试：DEBUG_ONE_HANDLE arcteryx-mantis-2-waist-pack
+
+# 支持单品调试：DEBUG_ONE_HANDLE=arcteryx-mantis-2-waist-pack
 if __name__ == "__main__":
     debug_handle = os.environ.get("DEBUG_ONE_HANDLE", "").strip()
     if debug_handle:
