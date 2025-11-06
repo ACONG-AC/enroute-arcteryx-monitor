@@ -7,7 +7,7 @@ on:
     - cron: "*/11 * * * *"
 
 permissions:
-  contents: write   # 提交 snapshot.json
+  contents: write   # 允许提交 snapshot.json
 
 concurrency:
   group: enroute-monitor
@@ -16,12 +16,12 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 45   # ⬅️ 给足总体超时预算
+    timeout-minutes: 45  # 给足总体超时预算
     env:
       PYTHONUNBUFFERED: "1"
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      # 可选：设为 true 则“无变更”也会文本通知
-      NOTIFY_ON_NO_CHANGE: ${{ vars.NOTIFY_ON_NO_CHANGE }}
+      # 同时兼容 Variables / Secrets，二者都没设置则为 false
+      NOTIFY_ON_NO_CHANGE: ${{ vars.NOTIFY_ON_NO_CHANGE || secrets.NOTIFY_ON_NO_CHANGE || 'false' }}
 
     steps:
       - name: Checkout
@@ -53,7 +53,20 @@ jobs:
           python -m playwright install chromium
           python -m playwright install-deps
 
-      # ⬇️ 关键：脚本运行增加 3 次重试 + 退避间隔
+      # ---- Webhook 健康检查（先确认能发到 Discord）----
+      - name: Ping Discord webhook (health check)
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          set -e
+          echo 'Testing Discord webhook…'
+          curl -sS -X POST -H "Content-Type: application/json" \
+            -d '{"content":"Webhook 健康检查 ✅（来自 GitHub Actions）"}' \
+            "$DISCORD_WEBHOOK_URL" -D /tmp/ping_headers.txt -o /tmp/ping_body.txt
+          echo 'Webhook HTTP status:'
+          head -n1 /tmp/ping_headers.txt || true
+
+      # ---- 关键：脚本运行增加 3 次重试 + 退避 ----
       - name: Run monitor (with retries)
         shell: bash
         run: |
@@ -84,13 +97,15 @@ jobs:
             echo "No snapshot changes."
           fi
 
-      # 失败时把日志打包，便于排查（可选）
-      - name: Upload playwright traces / logs
+      # 失败时打包日志/中间文件，方便排查
+      - name: Upload logs & artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: monitor-logs
           path: |
             **/*.log
+            /tmp/ping_headers.txt
+            /tmp/ping_body.txt
             new_map_partial.json
           if-no-files-found: ignore
