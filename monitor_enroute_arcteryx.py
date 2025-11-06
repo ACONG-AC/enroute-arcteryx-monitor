@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import re
+import time
+import random
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -18,7 +20,7 @@ USER_AGENT = (
 SNAPSHOT = Path("snapshot.json")
 DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 
-REQUEST_TIMEOUT = 60000  # 单页加载超时（毫秒）
+REQUEST_TIMEOUT = 90000  # 单页加载超时（毫秒）
 SCROLL_PAUSE = 800       # 集合页滚动等待（毫秒）
 MAX_PAGES = 20           # 集合页兜底翻页上限
 # =================================================
@@ -118,7 +120,7 @@ async def parse_product(page, url: str) -> dict:
     解析商品页：
     返回 { url, title, variants: [{color, size, available}] }
     """
-    await page.goto(url, wait_until="domcontentloaded", timeout=REQUEST_TIMEOUT)
+    await page.goto(url, wait_until="networkidle", timeout=REQUEST_TIMEOUT)
     await page.wait_for_timeout(500)  # 给前端脚本一点渲染时间
     title = normalize_space(await _safe_get_title(page, url))
     variants = []
@@ -273,21 +275,40 @@ async def send_discord(changes):
                 print("Discord 推送失败:", resp.status, text)
 
 
+async def send_text(msg: str):
+    if not DISCORD_WEBHOOK:
+        print("WARN: 未设置 DISCORD_WEBHOOK_URL，跳过通知。")
+        return
+    async with aiohttp.ClientSession() as session:
+        async with session.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=30) as resp:
+            if resp.status >= 300:
+                text = await resp.text()
+                print("Discord 文本推送失败:", resp.status, text)
+
+
 async def parse_with_retry(page, url: str, tries=3):
     """
-    包装 parse_product，失败时自动重试（递增退避）
+    包装 parse_product，失败时自动重试（递增退避 + 耗时日志）
     """
     for t in range(1, tries + 1):
+        start = time.time()
         try:
-            return await parse_product(page, url)
+            res = await parse_product(page, url)
+            dur = int((time.time() - start) * 1000)
+            print(f"  ✅ 成功: {url} ({dur} ms)")
+            return res
         except Exception as e:
-            print(f"  ⚠️ 第 {t} 次尝试失败: {url} -> {e}")
+            dur = int((time.time() - start) * 1000)
+            print(f"  ⚠️ 第 {t} 次失败 ({dur} ms): {url} -> {e}")
             if t == tries:
                 raise
             await asyncio.sleep(1.5 * t)  # 递增退避
 
 
 async def run_once():
+    if not DISCORD_WEBHOOK:
+        print("WARN: 环境变量 DISCORD_WEBHOOK_URL 为空；将无法发送 Discord 通知。")
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -301,11 +322,35 @@ async def run_once():
             viewport={"width": 1400, "height": 1000},
             locale="en-US",
         )
+
+        # 🚀 关键：拦截重资源与跟踪脚本，页面更快更稳
+        async def _route_filter(route):
+            r = route.request
+            rt = r.resource_type
+            url = r.url
+            # 屏蔽图片/视频/音频/字体
+            if rt in ("image", "media", "font"):
+                return await route.abort()
+            # 屏蔽常见分析/广告域名（可按需增减）
+            blocked = ("googletagmanager.com", "google-analytics.com", "doubleclick.net",
+                       "facebook.net", "hotjar.com")
+            if any(b in url for b in blocked):
+                return await route.abort()
+            return await route.continue_()
+
+        await context.route("**/*", _route_filter)
+
         page = await context.new_page()
+        # 默认等待更宽松一点
+        page.set_default_timeout(60000)
+        page.set_default_navigation_timeout(60000)
 
         print("抓取品牌集合页商品链接…")
         urls = await get_all_product_urls(page)
         print(f"共发现 {len(urls)} 个商品链接")
+
+        # 在写入新快照之前，记录是否是首次运行
+        is_first_run = not SNAPSHOT.exists()
 
         new_map = {}
         for i, u in enumerate(urls, 1):
@@ -328,9 +373,15 @@ async def run_once():
 
             print(f"[{i}/{len(urls)}] {title} - {len(prod['variants'])} 个变体")
 
-            # 轻度节流，避免网站限流
-            if i % 10 == 0:
-                await asyncio.sleep(2)
+            # 轻度节流 + 随机抖动，降低限流概率
+            if i % 8 == 0:
+                await asyncio.sleep(1.2 + random.random())  # 1.2~2.2 秒
+
+            # 检查点：每 50 个写一次中间产物（防中途失败白跑）
+            if i % 50 == 0:
+                Path("new_map_partial.json").write_text(
+                    json.dumps(new_map, ensure_ascii=False, indent=2), "utf-8"
+                )
 
         # 载入旧快照
         old_map = {}
@@ -347,9 +398,18 @@ async def run_once():
         # 写入新快照
         SNAPSHOT.write_text(json.dumps(new_map, ensure_ascii=False, indent=2), "utf-8")
 
-        # 通知
-        if changes:
+        # 通知逻辑
+        notify_on_no_change = os.environ.get("NOTIFY_ON_NO_CHANGE", "").lower() == "true"
+        if is_first_run:
+            await send_text(
+                f"✅ 初始化完成：已建立库存基线。\n"
+                f"商品变体数：{len(new_map)}。\n"
+                f"后续仅在库存变更时通知（设置 NOTIFY_ON_NO_CHANGE=true 可每次报平安）。"
+            )
+        elif changes:
             await send_discord(changes)
+        elif notify_on_no_change:
+            await send_text("运行成功：本次无库存变更。")
 
         await browser.close()
 
@@ -359,6 +419,8 @@ if __name__ == "__main__":
     DEBUG_ONE_URL = os.environ.get("DEBUG_ONE_URL", "").strip()
     if DEBUG_ONE_URL:
         async def _single():
+            if not DISCORD_WEBHOOK:
+                print("WARN: 环境变量 DISCORD_WEBHOOK_URL 为空；将无法发送 Discord 通知。")
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(
                     headless=True,
@@ -367,7 +429,23 @@ if __name__ == "__main__":
                 ctx = await browser.new_context(
                     user_agent=USER_AGENT, viewport={"width": 1400, "height": 1000}, locale="en-US"
                 )
+                # 加速：路由拦截
+                async def _route_filter(route):
+                    r = route.request
+                    rt = r.resource_type
+                    url = r.url
+                    if rt in ("image", "media", "font"):
+                        return await route.abort()
+                    blocked = ("googletagmanager.com", "google-analytics.com", "doubleclick.net",
+                               "facebook.net", "hotjar.com")
+                    if any(b in url for b in blocked):
+                        return await route.abort()
+                    return await route.continue_()
+                await ctx.route("**/*", _route_filter)
+
                 p = await ctx.new_page()
+                p.set_default_timeout(60000)
+                p.set_default_navigation_timeout(60000)
                 prod = await parse_with_retry(p, DEBUG_ONE_URL, tries=3)
                 print(json.dumps(prod, ensure_ascii=False, indent=2))
                 await browser.close()
