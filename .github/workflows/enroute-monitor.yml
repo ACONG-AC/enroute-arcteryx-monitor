@@ -3,8 +3,8 @@ name: Enroute Arc'teryx Stock Monitor
 on:
   workflow_dispatch: {}
   schedule:
-    # 每 11 分钟运行一次（错开整点，避开流量波峰）
-    - cron: "*/11 * * * *"
+    # 每 21 分钟运行一次（错开整点，避开流量波峰）
+    - cron: "*/21 * * * *"
 
 permissions:
   contents: write   # 允许提交 snapshot.json
