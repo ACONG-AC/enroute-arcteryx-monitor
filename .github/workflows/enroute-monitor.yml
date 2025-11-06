@@ -16,12 +16,13 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # 给足总体超时预算
+    timeout-minutes: 45   # 给足总体超时预算
     env:
       PYTHONUNBUFFERED: "1"
+      # 关闭“无变更也通知”
+      NOTIFY_ON_NO_CHANGE: "false"
+      # Webhook 地址（仅在脚本需要发送时使用）
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      # 同时兼容 Variables / Secrets，二者都没设置则为 false
-      NOTIFY_ON_NO_CHANGE: ${{ vars.NOTIFY_ON_NO_CHANGE || secrets.NOTIFY_ON_NO_CHANGE || 'false' }}
 
     steps:
       - name: Checkout
@@ -53,20 +54,7 @@ jobs:
           python -m playwright install chromium
           python -m playwright install-deps
 
-      # ---- Webhook 健康检查（先确认能发到 Discord）----
-      - name: Ping Discord webhook (health check)
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          set -e
-          echo 'Testing Discord webhook…'
-          curl -sS -X POST -H "Content-Type: application/json" \
-            -d '{"content":"Webhook 健康检查 ✅（来自 GitHub Actions）"}' \
-            "$DISCORD_WEBHOOK_URL" -D /tmp/ping_headers.txt -o /tmp/ping_body.txt
-          echo 'Webhook HTTP status:'
-          head -n1 /tmp/ping_headers.txt || true
-
-      # ---- 关键：脚本运行增加 3 次重试 + 退避 ----
+      # 运行脚本（保留 3 次重试 + 退避）
       - name: Run monitor (with retries)
         shell: bash
         run: |
@@ -105,7 +93,5 @@ jobs:
           name: monitor-logs
           path: |
             **/*.log
-            /tmp/ping_headers.txt
-            /tmp/ping_body.txt
             new_map_partial.json
           if-no-files-found: ignore
