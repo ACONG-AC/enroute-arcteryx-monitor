@@ -3,11 +3,11 @@ name: Enroute Arc'teryx Stock Monitor
 on:
   workflow_dispatch: {}
   schedule:
-    # 每 10 分钟跑一次（UTC）
-    - cron: "*/10 * * * *"
+    # 每 11 分钟运行一次（错开整点，避开流量波峰）
+    - cron: "*/11 * * * *"
 
 permissions:
-  contents: write   # 允许提交 snapshot.json
+  contents: write   # 提交 snapshot.json
 
 concurrency:
   group: enroute-monitor
@@ -16,9 +16,13 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 45   # ⬅️ 给足总体超时预算
     env:
       PYTHONUNBUFFERED: "1"
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      # 可选：设为 true 则“无变更”也会文本通知
+      NOTIFY_ON_NO_CHANGE: ${{ vars.NOTIFY_ON_NO_CHANGE }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,11 +53,26 @@ jobs:
           python -m playwright install chromium
           python -m playwright install-deps
 
-      - name: Run monitor
+      # ⬇️ 关键：脚本运行增加 3 次重试 + 退避间隔
+      - name: Run monitor (with retries)
+        shell: bash
         run: |
-          python monitor_enroute_arcteryx.py
+          set -euo pipefail
+          tries=3
+          for i in $(seq 1 $tries); do
+            echo "Attempt $i/$tries..."
+            if python monitor_enroute_arcteryx.py; then
+              echo "Run succeeded."
+              exit 0
+            fi
+            echo "Attempt $i failed. Sleeping $(( i * 20 ))s before retry..."
+            sleep $(( i * 20 ))  # 20s、40s 的退避等待
+          done
+          echo "All attempts failed."
+          exit 1
 
       - name: Commit snapshot if changed
+        if: always()
         run: |
           if git status --porcelain | grep -q "snapshot.json"; then
             git config user.name "github-actions[bot]"
@@ -64,3 +83,14 @@ jobs:
           else
             echo "No snapshot changes."
           fi
+
+      # 失败时把日志打包，便于排查（可选）
+      - name: Upload playwright traces / logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monitor-logs
+          path: |
+            **/*.log
+            new_map_partial.json
+          if-no-files-found: ignore
