@@ -23,7 +23,7 @@ DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 NOTIFY_ON_NO_CHANGE = os.environ.get("NOTIFY_ON_NO_CHANGE", "false").lower() in ("1", "true", "yes", "on")
 
 REQUEST_TIMEOUT = 20000   # 单次 HTTP 超时(ms)
-MAX_PAGES = 20
+MAX_PAGES = 20            # 集合页最多翻页数（HTTP & Playwright）
 SCROLL_PAUSE = 700
 MAX_CONCURRENCY = 8
 HTTP_RETRIES = 3
@@ -114,7 +114,7 @@ class HttpClient:
 
 http = HttpClient()
 
-# ----------------- 集合页：handles 获取（HTTP 优先 + Playwright 回退） -----------------
+# ----------------- 集合页：handles 获取（HTTP 分页优先 + Playwright 回退） -----------------
 async def get_handles_via_playwright() -> list[str]:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -156,7 +156,7 @@ async def get_handles_via_playwright() -> list[str]:
             await page.goto(COLLECTION, wait_until="commit")
 
         last_h = 0
-        for _ in range(20):  # 增加滚动轮数
+        for _ in range(20):  # 更长滚动
             await collect()
             await page.mouse.wheel(0, 4000)
             await asyncio.sleep(SCROLL_PAUSE/1000)
@@ -181,21 +181,46 @@ async def get_handles_via_playwright() -> list[str]:
         await browser.close()
         return sorted(handles)
 
-async def get_handles_via_http(session: aiohttp.ClientSession) -> list[str]:
-    html = await http.get_text(session, COLLECTION)
-    if not html:
-        return []
-    # 抓 a 链接中的 /products/<handle>
-    handles = set(re.findall(r'href="/products/([a-z0-9\-]+)"', html, flags=re.I))
+async def get_handles_via_http(session: aiohttp.ClientSession, max_pages: int = MAX_PAGES) -> list[str]:
+    """
+    纯 HTTP 解析集合页，并按 ?page=N 循环翻页，直到没有新增或到达 max_pages。
+    """
+    handles: set[str] = set()
+
+    async def fetch_one(page_no: int) -> int:
+        url = COLLECTION if page_no == 1 else f"{COLLECTION}?page={page_no}"
+        html = await http.get_text(session, url)
+        if not html:
+            print(f"[HTTP] page {page_no}: 请求失败或无内容")
+            return 0
+        # 兼容大小写与不同结尾（引号/斜杠/参数）
+        found = set(re.findall(r'href=["\'](?:https?://[^"\']+)?/products/([a-z0-9\-]+)(?:[/"\']|\?)', html, flags=re.I))
+        before = len(handles)
+        handles.update(found)
+        added = len(handles) - before
+        print(f"[HTTP] page {page_no}: 新增 {added} 个（累计 {len(handles)}）")
+        return added
+
+    page = 1
+    while page <= max_pages:
+        added = await fetch_one(page)
+        if added == 0:
+            break
+        page += 1
+
     return sorted(handles)
 
 async def get_all_product_handles() -> list[str]:
-    # 先 HTTP，抓不到或太少再用 Playwright
+    # 先尝试 HTTP 分页抓取
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT/1000)) as s:
-        handles = await get_handles_via_http(s)
-    if len(handles) >= 10:
-        return handles
-    return await get_handles_via_playwright()
+        handles = await get_handles_via_http(s, max_pages=MAX_PAGES)
+        print(f"[HTTP] 集合页累计抓到 {len(handles)} 个 handle")
+    # 如果 HTTP 抓取仍然很少（可能被风控/结构变化），回退到 Playwright
+    if len(handles) < 30:
+        print("[HTTP] 抓取数偏少，回退 Playwright 补抓…")
+        handles = await get_handles_via_playwright()
+        print(f"[PW] 补抓后共 {len(handles)} 个 handle")
+    return handles
 
 # ----------------- 产品详情抓取：三段式回退 -----------------
 async def fetch_product_via_js(handle: str, session: aiohttp.ClientSession):
@@ -423,7 +448,7 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
             })
     return events
 
-# ----------------- Discord 发送（最小改动：分批发送 embeds ≤ 10） -----------------
+# ----------------- Discord 发送（分批 embeds ≤ 10） -----------------
 def events_to_embeds(events: list[dict], currency: str) -> list[dict]:
     """不再截断，让批量发送逻辑控制每批大小。"""
     embeds = []
