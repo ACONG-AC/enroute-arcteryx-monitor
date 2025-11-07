@@ -1,0 +1,151 @@
+{
+  "version": 2,
+  "products": {
+    "arcteryx-mens-beta-sl-jacket": "Beta SL Jacket",
+    "arcteryx-mens-rho-lt-hoody": "Rho LT Hoody",
+    "arcteryx-mens-cormac-hoody": "Cormac Hoody",
+    "arcteryx-mantis-1-waist-pack": "Mantis 1 Waist Pack",
+    "arcteryx-mens-sylan-gtx": "Sylan GTX",
+    "mens-gamma-hoody": "Gamma Hoody",
+    "arcteryx-womens-kyanite-hoody": "Women&#x27;s Kyanite Hoody",
+    "mens-kragg-shoe": "Kragg Shoe",
+    "mens-norvan-downword-logo-ss": "Norvan Downword Logo SS",
+    "womens-norvan-ld-4-gtx": "Women&#x27;s Norvan LD 4 GTX",
+    "arcteryx-mantis-2-waist-pack": "Mantis 2 Waist Pack",
+    "mens-norvan-ld-4": "Norvan LD 4"
+  },
+  "variants": {
+    "name:Beta SL Jacket||": {
+      "handle": "arcteryx-mens-beta-sl-jacket",
+      "title": "Beta SL Jacket",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 600,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/arcteryx-mens-beta-sl-jacket"
+    },
+    "name:Rho LT Hoody||": {
+      "handle": "arcteryx-mens-rho-lt-hoody",
+      "title": "Rho LT Hoody",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 140,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/arcteryx-mens-rho-lt-hoody"
+    },
+    "name:Cormac Hoody||": {
+      "handle": "arcteryx-mens-cormac-hoody",
+      "title": "Cormac Hoody",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 110,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/arcteryx-mens-cormac-hoody"
+    },
+    "name:Mantis 1 Waist Pack||": {
+      "handle": "arcteryx-mantis-1-waist-pack",
+      "title": "Mantis 1 Waist Pack",
+      "color": "",
+      "size": "",
+      "available": true,
+      "price_cents": 55,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/arcteryx-mantis-1-waist-pack"
+    },
+    "name:Sylan GTX||": {
+      "handle": "arcteryx-mens-sylan-gtx",
+      "title": "Sylan GTX",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 280,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/arcteryx-mens-sylan-gtx"
+    },
+    "name:Gamma Hoody||": {
+      "handle": "mens-gamma-hoody",
+      "title": "Gamma Hoody",
+      "color": "",
+      "size": "",
+      "available": true,
+      "price_cents": 360,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/mens-gamma-hoody"
+    },
+    "name:Women&#x27;s Kyanite Hoody||": {
+      "handle": "arcteryx-womens-kyanite-hoody",
+      "title": "Women&#x27;s Kyanite Hoody",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 240,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/arcteryx-womens-kyanite-hoody"
+    },
+    "name:Kragg Shoe||": {
+      "handle": "mens-kragg-shoe",
+      "title": "Kragg Shoe",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 190,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/mens-kragg-shoe"
+    },
+    "name:Norvan Downword Logo SS||": {
+      "handle": "mens-norvan-downword-logo-ss",
+      "title": "Norvan Downword Logo SS",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 110,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/mens-norvan-downword-logo-ss"
+    },
+    "name:Women&#x27;s Norvan LD 4 GTX||": {
+      "handle": "womens-norvan-ld-4-gtx",
+      "title": "Women&#x27;s Norvan LD 4 GTX",
+      "color": "",
+      "size": "",
+      "available": true,
+      "price_cents": 240,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/womens-norvan-ld-4-gtx"
+    },
+    "name:Mantis 2 Waist Pack||": {
+      "handle": "arcteryx-mantis-2-waist-pack",
+      "title": "Mantis 2 Waist Pack",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 65,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/arcteryx-mantis-2-waist-pack"
+    },
+    "name:Norvan LD 4||": {
+      "handle": "mens-norvan-ld-4",
+      "title": "Norvan LD 4",
+      "color": "",
+      "size": "",
+      "available": false,
+      "price_cents": 200,
+      "inventory_qty": null,
+      "variant_id": "",
+      "url": "https://enroute.run/products/mens-norvan-ld-4"
+    }
+  }
+}
