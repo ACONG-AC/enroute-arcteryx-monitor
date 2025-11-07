@@ -3,33 +3,31 @@ name: Enroute Arc'teryx Stock Monitor
 on:
   workflow_dispatch: {}
   schedule:
-    # 每 21 分钟运行一次（错开整点，避开流量波峰）
-    - cron: "*/21 * * * *"
+    - cron: "*/11 * * * *"
 
 permissions:
-  contents: write   # 允许提交 snapshot.json
+  contents: write
 
 concurrency:
   group: enroute-monitor
-  cancel-in-progress: false
+  cancel-in-progress: true   # 避免并发运行互相抢推送
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 45   # 给足总体超时预算
+    timeout-minutes: 45
     env:
       PYTHONUNBUFFERED: "1"
-      # 关闭“无变更也通知”
       NOTIFY_ON_NO_CHANGE: "false"
-      # Webhook 地址（仅在脚本需要发送时使用）
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
     steps:
-      - name: Checkout
+      - name: Checkout main with full history
         uses: actions/checkout@v4
         with:
+          ref: main            # 确保在 main 分支工作
+          fetch-depth: 0       # 拿到完整历史，支持 rebase
           persist-credentials: true
-          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -54,7 +52,6 @@ jobs:
           python -m playwright install chromium
           python -m playwright install-deps
 
-      # 运行脚本（保留 3 次重试 + 退避）
       - name: Run monitor (with retries)
         shell: bash
         run: |
@@ -67,25 +64,56 @@ jobs:
               exit 0
             fi
             echo "Attempt $i failed. Sleeping $(( i * 20 ))s before retry..."
-            sleep $(( i * 20 ))  # 20s、40s 的退避等待
+            sleep $(( i * 20 ))
           done
           echo "All attempts failed."
           exit 1
 
-      - name: Commit snapshot if changed
+      - name: Commit snapshot if changed (rebase & retry & lease)
         if: always()
+        shell: bash
         run: |
-          if git status --porcelain | grep -q "snapshot.json"; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add snapshot.json
-            git commit -m "chore: update snapshot.json [skip ci]"
-            git push
-          else
+          set -euo pipefail
+
+          # 只有 snapshot.json 变化时才继续
+          if ! git status --porcelain | grep -q "snapshot.json"; then
             echo "No snapshot changes."
+            exit 0
           fi
 
-      # 失败时打包日志/中间文件，方便排查
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 确保在 main 分支（checkout@v4 可能是分离头指针场景）
+          git checkout -B main
+
+          # 同步远端最新提交
+          git fetch --prune origin main
+
+          # 基于远端最新提交做 rebase（避免生成 merge commit）
+          git pull --rebase --autostash origin main || true
+
+          # 提交当前快照
+          git add snapshot.json
+          git commit -m "chore: update snapshot.json [skip ci]" || echo "Nothing to commit after rebase."
+
+          # 推送，失败则重试（应对并发/快速连续提交）
+          tries=3
+          for i in $(seq 1 $tries); do
+            if git push --porcelain origin HEAD:main; then
+              echo "Push succeeded."
+              exit 0
+            fi
+            echo "Push rejected. Re-fetch & rebase... attempt $i/$tries"
+            git fetch --prune origin main
+            git pull --rebase --autostash origin main || true
+            sleep $(( i * 5 ))
+          done
+
+          echo "Soft push failed after $tries attempts. Trying force-with-lease once..."
+          # 最后一招：安全强推（仅当远端未被他人更新时才会覆盖）
+          git push --force-with-lease origin HEAD:main
+
       - name: Upload logs & artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
