@@ -295,7 +295,7 @@ async def fetch_product(handle: str, session: aiohttp.ClientSession):
       1) /products/<handle>.js
       2) /products/<handle>.json
       3) 抓 HTML 提取内嵌 JSON
-    并尽量补齐 color/size/price/available/inventory_qty
+    并尽量补齐 color/size/price/available/inventory_qty/sku
     """
     # 1) .js
     data = await fetch_product_via_js(handle, session)
@@ -319,6 +319,7 @@ async def fetch_product(handle: str, session: aiohttp.ClientSession):
         available = bool(v.get("available", False))
         color = v.get("option2") or ""
         size  = v.get("option1") or ""
+        sku   = v.get("sku") or ""
         if not color and isinstance(v.get("options"), list) and len(v["options"]) >= 2:
             color, size = v["options"][0], v["options"][1]
 
@@ -332,6 +333,7 @@ async def fetch_product(handle: str, session: aiohttp.ClientSession):
 
         variants.append({
             "variant_id": str(vid) if vid else "",
+            "sku": normalize_space(str(sku)),
             "color": normalize_space(str(color)),
             "size": normalize_space(str(size)),
             "available": available,
@@ -372,6 +374,11 @@ def read_snapshot() -> dict:
     return build_snapshot({}, {})
 
 def diff_events(old_snap: dict, new_snap: dict, currency: str):
+    """
+    事件类型：
+      NEW_PRODUCT / NEW_VARIANT / PRICE_CHANGE / INVENTORY_INCREASE / INVENTORY_INCREASE_PRODUCT
+    仅“库存增加”类事件会通知（减少不通知）；上新、价格变化也通知。
+    """
     events = []
     old_p, new_p = old_snap.get("products", {}), new_snap.get("products", {})
     old_v, new_v = old_snap.get("variants", {}), new_snap.get("variants", {})
@@ -386,9 +393,12 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
         if ov is None:
             events.append({
                 "type": "NEW_VARIANT",
-                "key": k, "title": nv.get("title"),
+                "key": k, "handle": nv.get("handle"),
+                "title": nv.get("title"),
                 "color": nv.get("color"),
                 "size": nv.get("size"),
+                "sku": nv.get("sku"),
+                "price_cents": nv.get("price_cents"),
                 "url": nv.get("url")
             })
             continue
@@ -396,9 +406,11 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
         if np is not None and op is not None and np != op:
             events.append({
                 "type": "PRICE_CHANGE",
-                "key": k, "title": nv.get("title"),
+                "key": k, "handle": nv.get("handle"),
+                "title": nv.get("title"),
                 "color": nv.get("color"),
                 "size": nv.get("size"),
+                "sku": nv.get("sku"),
                 "old_price": op,
                 "new_price": np,
                 "currency": currency,
@@ -408,22 +420,28 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
         if isinstance(n_q, int) and isinstance(o_q, int) and n_q > o_q:
             events.append({
                 "type": "INVENTORY_INCREASE",
-                "key": k, "title": nv.get("title"),
+                "key": k, "handle": nv.get("handle"),
+                "title": nv.get("title"),
                 "color": nv.get("color"),
                 "size": nv.get("size"),
+                "sku": nv.get("sku"),
                 "old_qty": o_q,
                 "new_qty": n_q,
+                "price_cents": nv.get("price_cents"),
                 "url": nv.get("url")
             })
         else:
             if ov.get("available") is False and nv.get("available") is True:
                 events.append({
                     "type": "INVENTORY_INCREASE",
-                    "key": k, "title": nv.get("title"),
+                    "key": k, "handle": nv.get("handle"),
+                    "title": nv.get("title"),
                     "color": nv.get("color"),
                     "size": nv.get("size"),
+                    "sku": nv.get("sku"),
                     "old_qty": None,
                     "new_qty": None,
+                    "price_cents": nv.get("price_cents"),
                     "url": nv.get("url")
                 })
 
@@ -448,78 +466,101 @@ def diff_events(old_snap: dict, new_snap: dict, currency: str):
             })
     return events
 
-# ----------------- Discord 发送（分批 embeds ≤ 10） -----------------
-def events_to_embeds(events: list[dict], currency: str) -> list[dict]:
-    """不再截断，让批量发送逻辑控制每批大小。"""
-    embeds = []
-    for e in events:
-        t = e["type"]
-        if t == "NEW_PRODUCT":
-            embeds.append({
-                "title": f"🆕 上新 · {e['title']}",
-                "url": f"{BASE}/products/{e['handle']}",
-                "fields": [
-                    {"name": "商品", "value": e["title"], "inline": False},
-                    {"name": "Handle", "value": e["handle"], "inline": True},
-                ]
-            })
-        elif t == "NEW_VARIANT":
-            embeds.append({
-                "title": f"🆕 新变体 · {e['title']}",
-                "url": e.get("url"),
-                "fields": [
-                    {"name": "颜色", "value": e.get("color") or "-", "inline": True},
-                    {"name": "尺码", "value": e.get("size") or "-", "inline": True},
-                ]
-            })
-        elif t == "PRICE_CHANGE":
-            embeds.append({
-                "title": f"💲 价格变化 · {e['title']}",
-                "url": e.get("url"),
-                "fields": [
-                    {"name": "颜色", "value": e.get("color") or "-", "inline": True},
-                    {"name": "尺码", "value": e.get("size") or "-", "inline": True},
-                    {"name": "旧价", "value": cents_to_str(e.get("old_price"), currency), "inline": True},
-                    {"name": "新价", "value": cents_to_str(e.get("new_price"), currency), "inline": True},
-                ]
-            })
-        elif t == "INVENTORY_INCREASE":
-            embeds.append({
-                "title": f"🟢 库存增加 · {e['title']}",
-                "url": e.get("url"),
-                "fields": [
-                    {"name": "颜色", "value": e.get("color") or "-", "inline": True},
-                    {"name": "尺码", "value": e.get("size") or "-", "inline": True},
-                    {"name": "变化", "value": "缺货 → 有货" if e.get("old_qty") is None else f"{e['old_qty']} → {e['new_qty']}", "inline": False},
-                ]
-            })
-        elif t == "INVENTORY_INCREASE_PRODUCT":
-            embeds.append({
-                "title": f"🟢 可购变体数增加 · {e['title']}",
-                "url": f"{BASE}/products/{e['handle']}",
-                "fields": [
-                    {"name": "可购变体数", "value": f"{e['old_count']} → {e['new_count']}", "inline": True}
-                ]
-            })
-    return embeds
+# ----------------- 文本格式化 & 发送 -----------------
+SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL"]
+def sort_size_key(s: str) -> int:
+    s = s.upper()
+    if s in SIZE_ORDER: return SIZE_ORDER.index(s)
+    # 数字码（如 28/30/…）
+    m = re.match(r"^(\d+)", s)
+    if m: return 100 + int(m.group(1))
+    return 999
 
-async def send_discord_embeds_batched(embeds: list[dict], batch_size: int = 10):
-    """按 Discord 限制，将 embeds 分批发送；每批 <= 10。"""
-    if not DISCORD_WEBHOOK:
-        print("WARN: 未设置 DISCORD_WEBHOOK_URL，跳过通知。")
-        return
-    if not embeds:
-        return
-    async with aiohttp.ClientSession() as session:
-        total_batches = (len(embeds) + batch_size - 1) // batch_size
-        for i in range(0, len(embeds), batch_size):
-            chunk = embeds[i:i + batch_size]
-            async with session.post(DISCORD_WEBHOOK, json={"embeds": chunk}, timeout=30) as resp:
-                body = await resp.text()
-                print(f"Discord embeds status={resp.status}, batch {i//batch_size + 1}/{total_batches}, size={len(chunk)}")
-                if resp.status >= 300:
-                    print("Discord 推送失败:", resp.status, body)
-                    # 失败也继续后续批次，避免整批丢失
+def build_inventory_index(new_vars: dict[str, dict]):
+    """
+    生成当前可用库存索引：handle -> color -> { size: qty_or_flag, ... }
+    qty_or_flag: int 数量 或 "有货"
+    同时也返回一个 (handle,color,size) -> sku 的索引，方便取货号
+    以及 (handle,color,size) -> price_cents 的索引
+    """
+    inv = {}
+    sku_idx = {}
+    price_idx = {}
+
+    for v in new_vars.values():
+        h = v.get("handle"); c = v.get("color") or ""; s = v.get("size") or ""
+        if not h or not c or not s:
+            continue
+        if v.get("available") is not True:
+            continue
+        q = v.get("inventory_qty")
+        val = q if isinstance(q, int) and q > 0 else "有货"
+        inv.setdefault(h, {}).setdefault(c, {})
+        inv[h][c][s] = val
+
+        sk = v.get("sku") or ""
+        if sk:
+            sku_idx[(h, c, s)] = sk
+        price_idx[(h, c, s)] = v.get("price_cents")
+    return inv, sku_idx, price_idx
+
+def format_sizes_line(size_map: dict[str, object]) -> str:
+    if not size_map:
+        return "—"
+    items = []
+    for sz in sorted(size_map.keys(), key=sort_size_key):
+        v = size_map[sz]
+        if isinstance(v, int):
+            items.append(f"{sz}: {v}")
+        else:
+            items.append(f"{sz}: 有货")
+    return " | ".join(items)
+
+def find_sku_for_event(e, sku_idx) -> str:
+    # 优先精确 (handle,color,size)，否则尝试任意该 handle 的 sku
+    h, c, s = e.get("handle"), e.get("color"), e.get("size")
+    if h and c and s and (h, c, s) in sku_idx:
+        return sku_idx[(h, c, s)]
+    # 退化：找该 handle 的任意 sku
+    for (hh, _, _), sk in sku_idx.items():
+        if hh == h and sk:
+            return sk
+    return "-"
+
+def format_price_line(e) -> str:
+    if e.get("type") == "PRICE_CHANGE":
+        return f"$ {cents_to_str(e['old_price'], e.get('currency')).replace('$','').strip()} → $ {cents_to_str(e['new_price'], e.get('currency')).replace('$','').strip()}"
+    # 其他事件显示当前价（若有）
+    pc = e.get("price_cents")
+    if pc is None:
+        return "-"
+    return f"$ {cents_to_str(pc, e.get('currency')).replace('$','').strip()}"
+
+def format_event_text(e: dict, inv_index, sku_idx, price_idx) -> str:
+    h = e.get("handle")
+    title = e.get("title") or h or "-"
+    color = e.get("color") or "-"
+    sizes_line = "—"
+    # 从当前索引里拿到该 handle + color 的所有尺码及库存
+    if h and color != "-":
+        sizes_line = format_sizes_line(inv_index.get(h, {}).get(color, {}))
+    # 货号：优先用变体 SKU
+    sku = find_sku_for_event(e, sku_idx)
+    # 价格
+    price_line = format_price_line(e)
+    # 链接
+    url = e.get("url") or f"{BASE}/products/{h}"
+
+    # 统一文本格式
+    lines = [
+        f"• 名称：{title}",
+        f"• 货号：{sku}",
+        f"• 颜色：{color}",
+        f"• 价格：{price_line}",
+        f"📊 库存信息：{sizes_line}",
+        f"🔗 [直达链接]({url})"
+    ]
+    return "\n".join(lines)
 
 async def send_text(msg: str):
     if not DISCORD_WEBHOOK:
@@ -532,13 +573,21 @@ async def send_text(msg: str):
             if resp.status >= 300:
                 print("Discord 文本推送失败:", resp.status, body)
 
+async def send_texts_individually(msgs: list[str], pause_sec: float = 0.5):
+    """逐条发送，避免 2000 字限制与 embeds 限制。"""
+    for i, m in enumerate(msgs, 1):
+        await send_text(m)
+        await asyncio.sleep(pause_sec)
+
 # ----------------- 主流程 -----------------
+def build_snapshot(products: dict[str, str], variants_map: dict[str, dict]) -> dict:
+    return {"version": 2, "products": products, "variants": variants_map}
+
 async def run_once():
     print("收集商品 handle ...")
     handles = await get_all_product_handles()
     print(f"共发现 {len(handles)} 个商品 handle")
 
-    is_first_run = not SNAPSHOT.exists()
     old_snap = read_snapshot()
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -591,21 +640,27 @@ async def run_once():
                 "price_cents": v.get("price_cents"),
                 "inventory_qty": v.get("inventory_qty"),
                 "variant_id": v.get("variant_id"),
+                "sku": v.get("sku", ""),
                 "url": url,
+                "currency": currency_seen,
             }
             k = to_variant_key(entry)
             new_variants[k] = entry
 
     new_snap = build_snapshot(new_products, new_variants)
 
+    # 计算事件
     events = diff_events(old_snap, new_snap, currency_seen)
     print(f"事件条目：{len(events)}")
+
+    # 写入新快照
     SNAPSHOT.write_text(json.dumps(new_snap, ensure_ascii=False, indent=2), "utf-8")
 
-    # 按你的要求：初始化 & 无变更都不发；仅有事件时发送
+    # 仅在有事件时通知
     if events:
-        embeds = events_to_embeds(events, currency_seen)
-        await send_discord_embeds_batched(embeds, batch_size=10)
+        inv_index, sku_idx, price_idx = build_inventory_index(new_snap.get("variants", {}))
+        msgs = [format_event_text(e, inv_index, sku_idx, price_idx) for e in events]
+        await send_texts_individually(msgs, pause_sec=0.4)
     elif NOTIFY_ON_NO_CHANGE:
         await send_text("运行成功：本次无上新、无价格变化、无库存增加。")
 
